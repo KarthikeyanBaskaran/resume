@@ -1,21 +1,8 @@
-"""
-Simple HTML and PDF resume generator from structurized YAML files.
-
-Usage:
-    build.py [-o=<DIR>] [-f=<FORMAT>] [-t=<THEME>] <resume_file>
-
-Options:
-    -o=<DIR>, --output_dir=<DIR>     Output directory for the build files. [default: build].
-    -f=<FORMAT>, --format=<FORMAT>   Format of the build [default: html].
-    -t=<NAME>, --theme=<NAME>        Name of the theme to use.
-"""
-
 import os
 import yaml
 import shutil
-import docopt
 import jinja2
-import helpers
+from weasyprint import HTML
 
 
 # Template defaults
@@ -25,106 +12,88 @@ defaults = {
 
 
 def read_yaml(filename):
-    """
-    Read Yaml file given by ``filename`` and return dictionary data.
-    """
+    """Read YAML file and return its content as a dictionary."""
     with open(filename, 'rt') as f:
-        return yaml.load(f)
+        return yaml.safe_load(f)
 
 
-def render_template(tpl, vars):
-    """
-    Render template file with ``vars`` arguments.
-    """
-    with open(tpl, 'rt') as f:
+def render_template(template_path, vars):
+    """Render a template file with provided variables."""
+    with open(template_path, 'rt') as f:
         tpl = jinja2.Template(f.read())
-
     return tpl.render(**vars)
 
 
-def copy_static_data(theme_dir, output_dir):
-    """
-    Copy contents of theme directory skipping all jinja template files.
-    """
+def copy_static_files(theme_dir, output_dir):
+    """Copy non-template static files (like images, css) from the theme directory."""
     def ignored_files(src, names):
         return [name for name in names if name.endswith('.jinja2')]
 
     shutil.copytree(theme_dir, output_dir, ignore=ignored_files)
 
 
-def clean(output_dir):
-    """
-    Remove the output directory.
-    """
-    shutil.rmtree(output_dir, ignore_errors=True)
+def clean_directory(output_dir):
+    """Remove the output directory if it exists."""
+    if os.path.exists(output_dir):
+        shutil.rmtree(output_dir)
 
 
-def build(data, config, output_dir):
-    """
-    Build the final directory, rendering all templates and copying source files
-    """
-    theme_name = config.get('theme', 'simple')
+def build_html(data, config, output_dir):
+    """Generate the HTML version of the resume."""
+    theme_name = config.get('theme', 'default')
     vars = defaults.copy()
     vars.update(data)
     vars['config'] = config
-    vars['h'] = helpers  # make helpers module accessible via 'h' shortcut.
 
     theme_location = os.path.join('themes', theme_name)
+    clean_directory(output_dir)
+    os.makedirs(output_dir, exist_ok=True)
+    
+    copy_static_files(theme_location, output_dir)
 
-    clean(output_dir)
-    copy_static_data(theme_location, output_dir)
-
+    # Iterate over theme files and render templates
     for filename in os.listdir(theme_location):
-        if not filename.endswith('.jinja2'):
-            continue
-
-        html = render_template(os.path.join(theme_location, filename),
-                               vars)
-
-        rendered_file = filename.replace('.jinja2', '.html')
-        with open(os.path.join(output_dir, rendered_file), 'wt') as f:
-            f.write(html)
+        if filename.endswith('.jinja2'):
+            html = render_template(os.path.join(theme_location, filename), vars)
+            output_filename = filename.replace('.jinja2', '.html')
+            with open(os.path.join(output_dir, output_filename), 'wt') as f:
+                f.write(html)
 
 
-def make_html(config, data):
-    """
-    Generate static html build of the resume given by input `data`.
-    """
-    output_dir = config.get('output_dir', 'build')
-    build(data, config, output_dir)
-
-
-def make_pdf(config, data):
-    """
-    Generate PDF file out of generated 'index.html' page.
-    """
-    from weasyprint import HTML
-    output_dir = config.get('output_dir', 'build')
-    output_file = os.path.join(output_dir, config.get('pdf_file', 'resume.pdf'))
-    input_file = os.path.join(output_dir, 'index.html')
-    theme_location = os.path.join('themes', config['theme'])
-    html = HTML(input_file, base_url=theme_location)
-    html.write_pdf(output_file)
+def build_pdf(data, config, output_dir):
+    """Generate the PDF version of the resume using the HTML output."""
+    theme_name = config.get('theme', 'default')
+    input_html = os.path.join(output_dir, 'index.html')
+    output_pdf = os.path.join(output_dir, config.get('pdf_file', 'resume.pdf'))
+    
+    # Convert HTML to PDF using WeasyPrint
+    HTML(input_html).write_pdf(output_pdf)
 
 
 def main():
-    """
-    Entry function for the script to handle command arguments
-    and run appropriate build like 'html' and 'pdf'.
-    """
-    args = docopt.docopt(__doc__)
-    output_format = args['--format']
-
-    # read resume data and config with some defaults
-    resume_data = read_yaml(args['<resume_file>'])
+    """Main function to read arguments, process YAML data, and generate output."""
+    import argparse
+    parser = argparse.ArgumentParser(description="Generate resume from YAML data.")
+    parser.add_argument('resume_file', help='Path to the YAML file with resume data')
+    parser.add_argument('-o', '--output_dir', default='build', help='Output directory for generated files')
+    parser.add_argument('-t', '--theme', default='default', help='Theme to use for the resume')
+    parser.add_argument('-f', '--format', choices=['html', 'pdf'], default='html', help='Output format')
+    
+    args = parser.parse_args()
+    
+    # Read YAML data
+    resume_data = read_yaml(args.resume_file)
     config = resume_data.get('config', {})
-    config.setdefault('output_dir', args['--output_dir'])
-    config['theme'] = args['--theme'] or config.get('theme')
-    config.setdefault('theme', 'simple')
+    config.setdefault('output_dir', args.output_dir)
+    config['theme'] = args.theme
+    
+    # Generate output based on format
+    if args.format == 'html':
+        build_html(resume_data, config, args.output_dir)
+    elif args.format == 'pdf':
+        build_html(resume_data, config, args.output_dir)  # First generate HTML
+        build_pdf(resume_data, config, args.output_dir)   # Then convert to PDF
 
-    # build based on the given format
-    cmds = {'html': make_html, 'pdf': make_pdf}
-    return cmds[output_format](config, resume_data)
 
 if __name__ == '__main__':
     main()
